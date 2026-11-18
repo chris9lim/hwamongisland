@@ -1,0 +1,1011 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Open Ocean 3D Simulation</title>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.158.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.158.0/examples/jsm/"
+        }
+    }
+    </script>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #cfd8df; }
+        canvas { display: block; }
+        #fps { position: absolute; top: 16px; left: 16px; background: rgba(0,0,0,0.55); color: #fff; padding: 6px 12px; border-radius: 10px; font-size: 12px; letter-spacing: 0.8px; z-index: 100; backdrop-filter: blur(12px); }
+        .value { color: #60a5fa; font-weight: 600; font-family: 'SF Mono', Monaco, monospace; }
+        #info { position: absolute; bottom: 20px; right: 20px; background: rgba(0,0,0,0.55); border: 1px solid rgba(255,255,255,0.25); color: white; padding: 12px 16px; border-radius: 12px; font-size: 11px; line-height: 1.6; backdrop-filter: blur(20px); opacity: 0.9; }
+        #crosshair { position: absolute; top: 50%; left: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%; background: rgba(255,255,255,0.85); box-shadow: 0 0 0 1px rgba(0,0,0,0.5); pointer-events: none; z-index: 50; }
+        #startPrompt { position: absolute; top: 50%; left: 50%; transform: translate(-50%, 40px); background: rgba(0,0,0,0.6); color: white; padding: 12px 22px; border-radius: 12px; font-size: 15px; letter-spacing: 0.5px; pointer-events: none; z-index: 60; backdrop-filter: blur(12px); }
+    </style>
+</head>
+<body>
+    <div id="fps">FPS <span class="value" id="fpsInControls">60</span></div>
+    <div id="crosshair"></div>
+    <div id="startPrompt">Click to play</div>
+
+    <div id="info">
+        <div><strong>Controls</strong></div>
+        <div>Click: capture mouse (Esc to release)</div>
+        <div>WASD / Arrows: Move</div>
+        <div>Mouse: Look around</div>
+        <div>Space: Up &nbsp;|&nbsp; C: Down</div>
+        <div>Shift: Sprint</div>
+    </div>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { Water } from 'three/addons/objects/Water.js';
+        import { Sky } from 'three/addons/objects/Sky.js';
+        import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
+        // Performance monitoring
+        let frameCount = 0;
+        let lastTime = performance.now();
+        let fpsHistory = [];
+
+        // Keyboard movement state
+        const keys = { forward: false, backward: false, left: false, right: false, up: false, down: false, sprint: false };
+
+        // Movement settings
+        const moveSpeed = 50;
+        const lookSpeed = 0.002;
+
+        // Water interaction settings
+        let previousPosition = new THREE.Vector3();
+        let velocity = new THREE.Vector3();
+        let ripples = [];
+        const maxRipples = 10;
+        const waterLevel = 0;
+
+        // ## SCENE SETUP ##
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1500);
+
+        const renderer = new THREE.WebGLRenderer({
+            antialias: true, powerPreference: "high-performance", stencil: false,
+            depth: true, alpha: false, premultipliedAlpha: false
+        });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.0;
+        renderer.outputEncoding = THREE.sRGBEncoding;
+        renderer.setClearColor(0x000000, 0);
+        renderer.setClearAlpha(0);
+        document.body.appendChild(renderer.domElement);
+
+
+        camera.position.set(12, 6, 18);
+        previousPosition.copy(camera.position);
+
+        let pitch = 0;
+        let yaw = 0;
+        const isFirstPerson = true;
+
+        // Lighting
+        const sunLight = new THREE.DirectionalLight(0xffc4ac, 1.2);
+        sunLight.position.set(-40, 60, 30);
+        sunLight.castShadow = true;
+        sunLight.shadow.mapSize.width = 2048;
+        sunLight.shadow.mapSize.height = 2048;
+        sunLight.shadow.camera.near = 0.1;
+        sunLight.shadow.camera.far = 200;
+        sunLight.shadow.camera.left = -100;
+        sunLight.shadow.camera.right = 100;
+        sunLight.shadow.camera.top = 100;
+        sunLight.shadow.camera.bottom = -100;
+        scene.add(sunLight);
+
+        const ambientLight = new THREE.AmbientLight(0x6a4a52, 0.3);
+        scene.add(ambientLight);
+
+        const fillLight = new THREE.DirectionalLight(0x87ceeb, 0.2);
+        fillLight.position.set(40, 30, -30);
+        scene.add(fillLight);
+
+        function updateLighting() {
+            const fillLightOffset = new THREE.Vector3(40, 30, -30);
+            fillLight.position.copy(camera.position.clone().add(fillLightOffset));
+        }
+
+        // ## THREE.JS WATER ##
+        const waterGeometry = new THREE.PlaneGeometry(10000, 10000);
+
+        const water = new Water(waterGeometry, {
+            textureWidth: 512,
+            textureHeight: 512,
+            waterNormals: new THREE.TextureLoader().load('https://threejs.org/examples/textures/waternormals.jpg', function (texture) {
+                texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+            }),
+            sunDirection: new THREE.Vector3(),
+            sunColor: 0xffbfa6,
+            waterColor: 0x001e0f,
+            distortionScale: 3.7,
+            fog: scene.fog !== undefined
+        });
+
+        // Custom uniforms for interaction
+        water.material.uniforms.userPosition = { value: new THREE.Vector3() };
+        water.material.uniforms.userVelocity = { value: 0.0 };
+        water.material.uniforms.ripplePositions = { value: [] };
+        water.material.uniforms.rippleTimes = { value: [] };
+        water.material.uniforms.rippleCount = { value: 0 };
+
+        water.material.vertexShader = water.material.vertexShader.replace(
+            'void main() {',
+            `
+            uniform vec3 userPosition;
+            uniform float userVelocity;
+            uniform vec3 ripplePositions[10];
+            uniform float rippleTimes[10];
+            uniform int rippleCount;
+
+            float calculateUserWave(vec3 worldPos) {
+                float wave = 0.0;
+                float dist = distance(worldPos.xz, userPosition.xz);
+                float userWave = 0.0;
+                if (dist < 50.0) {
+                    float falloff = 1.0 - (dist / 50.0);
+                    userWave = sin(dist * 0.5 - time * 4.0) * userVelocity * 0.5 * falloff;
+                }
+                for (int i = 0; i < 10; i++) {
+                    if (i >= rippleCount) break;
+                    float rippleDist = distance(worldPos.xz, ripplePositions[i].xz);
+                    float rippleAge = time - rippleTimes[i];
+                    if (rippleAge > 0.0 && rippleAge < 3.0 && rippleDist < 30.0) {
+                        float rippleSpeed = 15.0;
+                        float expectedPos = rippleAge * rippleSpeed;
+                        float wavefront = abs(rippleDist - expectedPos);
+                        if (wavefront < 2.0) {
+                            float intensity = (1.0 - rippleAge / 3.0) * (1.0 - wavefront / 2.0);
+                            wave += sin(rippleDist * 0.8 - time * 3.0) * intensity * 0.8;
+                        }
+                    }
+                }
+                return wave;
+            }
+
+            void main() {`
+        );
+
+        water.material.vertexShader = water.material.vertexShader.replace(
+            'vec4 worldPosition = modelMatrix * vec4( transformed, 1.0 );',
+            `
+            vec4 worldPosition = modelMatrix * vec4( transformed, 1.0 );
+            float userWave = calculateUserWave(worldPosition.xyz);
+            worldPosition.y += userWave;
+            `
+        );
+
+        water.rotation.x = -Math.PI / 2;
+        scene.add(water);
+
+        // Sky
+        const sky = new Sky();
+        sky.scale.setScalar(10000);
+        scene.add(sky);
+
+        const skyUniforms = sky.material.uniforms;
+        skyUniforms['turbidity'].value = 11;
+        skyUniforms['rayleigh'].value = 1.0;
+        skyUniforms['mieCoefficient'].value = 0.011;
+        skyUniforms['mieDirectionalG'].value = 0.8;
+
+        // Sun setup
+        const sun = new THREE.Vector3();
+        const pmremGenerator = new THREE.PMREMGenerator(renderer);
+
+        const parameters = { elevation: 2, azimuth: 0 };
+
+        function updateSun() {
+            const phi = THREE.MathUtils.degToRad(90 - parameters.elevation);
+            const theta = THREE.MathUtils.degToRad(parameters.azimuth);
+            sun.setFromSphericalCoords(1, phi, theta);
+            const sunWorldPosition = camera.position.clone().add(sun.clone().multiplyScalar(1000));
+            sunLight.position.copy(sunWorldPosition);
+            sky.material.uniforms['sunPosition'].value.copy(sun);
+            water.material.uniforms['sunDirection'].value.copy(sun).normalize();
+        }
+        updateSun();
+
+        // ## OVERCAST CLOUD LAYER (set CLOUDS = true to bring it back) ##
+const CLOUDS = false;
+const cloudMat = new THREE.ShaderMaterial({
+    uniforms: { time: { value: 0 } },
+    side: THREE.BackSide, transparent: true, depthWrite: false, fog: false,
+    vertexShader: `varying vec3 vDir; void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `
+        varying vec3 vDir; uniform float time;
+        float h(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+        float n(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
+            return mix(mix(h(i), h(i+vec2(1,0)), f.x), mix(h(i+vec2(0,1)), h(i+vec2(1,1)), f.x), f.y); }
+        float fbm(vec2 p){ float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++){ s += a * n(p); p = p * 2.03 + vec2(1.7, 9.2); a *= 0.5; } return s; }
+        void main(){
+            vec3 d = normalize(vDir);
+            if (d.y < -0.02) discard;
+            float up = max(d.y, 0.0);
+            vec2 uv = d.xz / (up + 0.22) * 1.6 + vec2(time * 0.012, time * 0.006);
+            float cover = smoothstep(0.28, 0.62, fbm(uv));
+            float shade = fbm(uv * 2.0 + 5.0);
+            vec3 col = mix(vec3(0.95, 0.96, 0.98), vec3(0.66, 0.70, 0.76), shade * cover * 0.85);   // bright tops, soft grey undersides
+            float horizon = smoothstep(0.0, 0.25, up);
+            col = mix(vec3(0.82, 0.86, 0.90), col, horizon);                                         // hazy horizon
+            gl_FragColor = vec4(col, mix(0.9, cover * 0.97, horizon));
+        }`
+});
+const cloudDome = new THREE.Mesh(new THREE.SphereGeometry(1200, 32, 16), cloudMat);
+cloudDome.renderOrder = -1;
+cloudDome.frustumCulled = false;
+scene.add(cloudDome);
+
+// ## KOREAN-COAST ISLAND ##
+// Paste this right AFTER the line `updateSun();` (just before "## PERFORMANCE OPTIMIZATION ##").
+// Rugged granite ridges, pine forest, rocky headlands, sea stacks, a lighthouse and a small fishing village.
+
+const island = new THREE.Group();
+island.position.set(0, 0, -365);   // move this to put the island elsewhere
+scene.add(island);
+
+// ---------- noise helpers ----------
+const hash = (x, y) => { const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453; return n - Math.floor(n); };
+const sstep = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+function vnoise(x, y) {
+    const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+    const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+    const a = hash(xi, yi), b = hash(xi + 1, yi), c = hash(xi, yi + 1), d = hash(xi + 1, yi + 1);
+    return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+function fbm(x, y, oct = 4) {
+    let s = 0, a = 0.5, f = 1;
+    for (let i = 0; i < oct; i++) { s += a * vnoise(x * f, y * f); f *= 2; a *= 0.5; }
+    return s;
+}
+
+// ---------- coastline + river layout ----------
+const ISLAND_SIZE = 700;
+function coastD(x, z) {                                           // >0 = land, <0 = sea
+    const ang = Math.atan2(z, x);
+    const r = Math.hypot(x * 0.8, z) / 262;                       // slightly elongated island
+    const coast = 0.6
+        + 0.55 * (fbm(Math.cos(ang) * 1.6 + 7, Math.sin(ang) * 1.6 + 7, 4) - 0.45)  // big bays & headlands
+        + 0.05 * (vnoise(ang * 14, 3) - 0.5);                                         // jagged shoreline
+    return coast - r;
+}
+// River flows from the mountains toward +z (toward your start position) and empties into the sea
+const riverX = z => 14 * Math.sin(z * 0.028 + 1) + 7 * Math.sin(z * 0.075 + 2) - 10;
+const riverDist = (x, z) => Math.abs(x - riverX(z));
+let zMouth = 150;
+for (let z = 380; z > -380; z -= 2) { if (coastD(riverX(z), z) > 0.03) { zMouth = z; break; } }
+let zSrc = zMouth;
+for (let z = zMouth; z > zMouth - 230; z -= 2) { if (coastD(riverX(z), z) <= 0.03) break; zSrc = z; }
+const riverSurfaceY = z => 0.1 + Math.max(0, zMouth - z) * 0.1;  // gentle downhill slope to the sea
+
+// ---------- height function ----------
+function heightAt(x, z) {
+    const d = coastD(x, z);
+    if (d <= 0) return Math.max(d * 130, -40);                     // drops quickly into deep water
+    const inland = Math.min(d / 0.45, 1);
+    const ridge = Math.pow(1 - Math.abs(2 * fbm(x * 0.008 + 20, z * 0.008 + 20, 4) - 1), 2.2); // jagged granite peaks
+    const rock = vnoise(x * 0.09, z * 0.09) * 5;
+    const m = sstep(0.18, 0.5, d);                                // mountains only inland; a flat coastal plain for towns
+    let h = sstep(0, 0.05, d) * (2.5 + vnoise(x * 0.02, z * 0.02) * 1.8 + m * (inland * 24 + ridge * inland * 62 + rock * inland));
+    if (z > zSrc - 20 && z < zMouth + 30) {                       // carve the river valley
+        const rd = Math.abs(x - riverX(z));
+        const w = (1 - sstep(10, 26, rd)) * sstep(zSrc - 6, zSrc + 16, z);
+        if (w > 0) {
+            const bed = riverSurfaceY(z) - 1.3 + sstep(3.6, 9.5, rd) * 3.2;   // channel + banks
+            h = h * (1 - w) + bed * w;
+        }
+    }
+    return h;
+}
+function slopeAt(x, z) {
+    const e = 1.5;
+    const dx = heightAt(x + e, z) - heightAt(x - e, z);
+    const dz = heightAt(x, z + e) - heightAt(x, z - e);
+    return Math.hypot(dx, dz) / (2 * e);
+}
+
+// ---------- terrain mesh ----------
+const SEGS = 370;
+const terrainGeo = new THREE.PlaneGeometry(ISLAND_SIZE, ISLAND_SIZE, SEGS, SEGS);
+terrainGeo.rotateX(-Math.PI / 2);
+const tp = terrainGeo.attributes.position;
+for (let i = 0; i < tp.count; i++) tp.setY(i, heightAt(tp.getX(i), tp.getZ(i)));
+terrainGeo.computeVertexNormals();
+
+const sand = new THREE.Color(0xd8c79a), cliff = new THREE.Color(0x77736b), highRock = new THREE.Color(0xa49f94);
+const pine = new THREE.Color(0x2c5532), pineDark = new THREE.Color(0x1f4228), scrub = new THREE.Color(0x5f7a3a);
+const seabedCol = new THREE.Color(0x4a5a58);
+const col = new THREE.Color();
+const colors = new Float32Array(tp.count * 3);
+const tn = terrainGeo.attributes.normal;
+for (let i = 0; i < tp.count; i++) {
+    const h = tp.getY(i), x = tp.getX(i), z = tp.getZ(i);
+    const slope = 1 - tn.getY(i);
+    const n = vnoise(x * 0.15, z * 0.15);
+    if (h < 0) col.copy(seabedCol);
+    else if (h < 2.2 && slope < 0.2) col.copy(sand);
+    else if (slope > 0.32) col.copy(cliff).lerp(highRock, n * 0.5);
+    else if (h > 50) col.copy(highRock).lerp(cliff, n);
+    else {
+        col.copy(pine).lerp(pineDark, n);
+        col.lerp(scrub, sstep(30, 48, h) * 0.7);                   // sparse scrub near ridgelines
+        col.lerp(cliff, sstep(0.18, 0.32, slope));
+    }
+    if (z > zSrc - 8 && z < zMouth + 4 && riverDist(x, z) < 5.5 && h > -3) col.set(0x857d6a).lerp(sand, 0.3);   // pebbly river bed
+    colors.set([col.r, col.g, col.b], i * 3);
+}
+terrainGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+const terrain = new THREE.Mesh(terrainGeo, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 0 }));
+terrain.castShadow = terrain.receiveShadow = true;
+island.add(terrain);
+
+// ---------- choose town sites (flat, low ground) ----------
+const towns = [];
+for (let pass = 0; pass < 2 && towns.length < 6; pass++) {
+    for (let tries = 0; tries < 6000 && towns.length < 6; tries++) {
+        const x = (Math.random() - 0.5) * ISLAND_SIZE * 0.8, z = (Math.random() - 0.5) * ISLAND_SIZE * 0.8;
+        const h = heightAt(x, z);
+        if (h < 2 || h > (pass ? 16 : 9) || slopeAt(x, z) > (pass ? 0.16 : 0.09) || riverDist(x, z) < 14) continue;
+        if (towns.some(t => Math.hypot(t.x - x, t.z - z) < 75)) continue;
+        towns.push({ x, z, rad: 38 + Math.random() * 14, ang: Math.random() * Math.PI });
+    }
+}
+// mountain districts: terraced towers climbing the interior slopes
+const hills = [];
+for (let tries = 0; tries < 10000 && hills.length < 14; tries++) {
+    const x = (Math.random() - 0.5) * ISLAND_SIZE * 0.7, z = (Math.random() - 0.5) * ISLAND_SIZE * 0.7;
+    const h = heightAt(x, z);
+    if (coastD(x, z) < 0.22 || h < 18 || h > 80 || riverDist(x, z) < 30) continue;
+    if (hills.some(t => Math.hypot(t.x - x, t.z - z) < 50)) continue;
+    hills.push({ x, z, rad: 44 + Math.random() * 18, ang: Math.random() * Math.PI });
+}
+const nearTown = (x, z) => towns.some(t => Math.hypot(t.x - x, t.z - z) < t.rad * 1.6)
+    || hills.some(t => Math.hypot(t.x - x, t.z - z) < t.rad * 1.2);
+
+// ---------- pine forest (instanced) ----------
+const treeGeo = new THREE.ConeGeometry(1.3, 6, 6); treeGeo.translate(0, 3, 0);
+const treeMesh = new THREE.InstancedMesh(treeGeo, new THREE.MeshStandardMaterial({ roughness: 1, flatShading: true }), 4500);
+const dummy = new THREE.Object3D(); const tc = new THREE.Color();
+let placed = 0;
+for (let tries = 0; tries < 40000 && placed < 4500; tries++) {
+    const x = (Math.random() - 0.5) * ISLAND_SIZE, z = (Math.random() - 0.5) * ISLAND_SIZE;
+    const h = heightAt(x, z);
+    if (h < 2.5 || h > 42 || slopeAt(x, z) > 0.55) continue;
+    if (riverDist(x, z) < 8 || nearTown(x, z)) continue;
+    if (fbm(x * 0.03 + 50, z * 0.03 + 50, 3) < 0.35) continue;      // leave clearings
+    const s = 0.7 + Math.random() * 1.1;
+    dummy.position.set(x, h - 0.3, z);
+    dummy.scale.set(s, s * (0.9 + Math.random() * 0.5), s);
+    dummy.rotation.y = Math.random() * Math.PI;
+    dummy.updateMatrix();
+    treeMesh.setMatrixAt(placed, dummy.matrix);
+    treeMesh.setColorAt(placed, tc.setHSL(0.35 + Math.random() * 0.04, 0.45, 0.14 + Math.random() * 0.08));
+    placed++;
+}
+treeMesh.count = placed;
+treeMesh.castShadow = true;
+island.add(treeMesh);
+
+// ---------- offshore sea stacks (like the rocks at Kumgang / Chongseokjong) ----------
+const stackMat = new THREE.MeshStandardMaterial({ color: 0x8a867d, roughness: 1, flatShading: true });
+let stacks = 0;
+for (let tries = 0; tries < 600 && stacks < 12; tries++) {
+    const ang = Math.random() * Math.PI * 2, rad = 190 + Math.random() * 140;
+    const x = Math.cos(ang) * rad, z = Math.sin(ang) * rad;
+    if (heightAt(x, z) > -3) continue;                              // must be in water, not on land
+    const hgt = 45 + Math.random() * 20;
+    const g = new THREE.CylinderGeometry(1.5 + Math.random() * 2.5, 5 + Math.random() * 4, hgt, 7, 8);
+    const p = g.attributes.position;
+    for (let i = 0; i < p.count; i++) {
+        p.setX(i, p.getX(i) + (Math.random() - 0.5) * 1.6);
+        p.setZ(i, p.getZ(i) + (Math.random() - 0.5) * 1.6);
+        p.setY(i, p.getY(i) + (Math.random() - 0.5) * 1.2);
+    }
+    g.computeVertexNormals();
+    const m = new THREE.Mesh(g, stackMat);
+    m.position.set(x, -40 + hgt / 2, z);
+    m.castShadow = m.receiveShadow = true;
+    island.add(m);
+    stacks++;
+}
+
+// ---------- find shoreline spots for structures ----------
+function findShore(angle) {
+    for (let r = 380; r > 0; r -= 1) {
+        const x = Math.cos(angle) * r, z = Math.sin(angle) * r;
+        if (heightAt(x, z) > 3.5) return { x, z, r };
+    }
+    return null;
+}
+
+// Lighthouse on a headland
+const lhSpot = findShore(Math.PI * 0.25);
+if (lhSpot) {
+    const lh = new THREE.Group();
+    const tower = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.8, 10, 12), new THREE.MeshStandardMaterial({ color: 0xf2f2ee }));
+    tower.position.y = 5;
+    const stripe = new THREE.Mesh(new THREE.CylinderGeometry(1.35, 1.5, 2, 12), new THREE.MeshStandardMaterial({ color: 0xb3282d }));
+    stripe.position.y = 5;
+    const lamp = new THREE.Mesh(new THREE.CylinderGeometry(1.2, 1.2, 1.4, 12), new THREE.MeshStandardMaterial({ color: 0xffe9a0, emissive: 0xffc94d, emissiveIntensity: 0.6 }));
+    lamp.position.y = 10.7;
+    const cap = new THREE.Mesh(new THREE.ConeGeometry(1.5, 1.4, 12), new THREE.MeshStandardMaterial({ color: 0x333333 }));
+    cap.position.y = 12.1;
+    lh.add(tower, stripe, lamp, cap);
+    lh.position.set(lhSpot.x, heightAt(lhSpot.x, lhSpot.z), lhSpot.z);
+    lh.traverse(o => { if (o.isMesh) o.castShadow = true; });
+    island.add(lh);
+}
+
+// ---------- TOWNS: Kowloon Walled City-style megablocks ----------
+const bDummy = new THREE.Object3D();
+const placedB = [];
+const pick = a => a[Math.floor(Math.random() * a.length)];
+
+// facade tile: dark windows, AC boxes, rust strips, grime; plus a matching emissive map so some windows glow
+const FCOLS = 6, FROWS = 6, FTW = 256, FTH = 256;
+const facade = (() => {
+    const c = document.createElement('canvas'), e = document.createElement('canvas');
+    c.width = e.width = FTW; c.height = e.height = FTH;
+    const g = c.getContext('2d'), ge = e.getContext('2d');
+    g.fillStyle = '#d4d0c6'; g.fillRect(0, 0, FTW, FTH);
+    ge.fillStyle = '#000'; ge.fillRect(0, 0, FTW, FTH);
+    const cw = FTW / FCOLS, rh = FTH / FROWS;
+    for (let r = 0; r < FROWS; r++) {
+        g.fillStyle = 'rgba(60,55,45,0.35)'; g.fillRect(0, r * rh, FTW, 3);                     // floor slab line
+        for (let q = 0; q < FCOLS; q++) {
+            const x = q * cw + 7, y = r * rh + 9;
+            g.fillStyle = '#2b3640'; g.fillRect(x, y, cw - 14, rh - 20);                          // window
+            if (Math.random() < 0.3) { ge.fillStyle = Math.random() < 0.5 ? '#ff2e22' : '#ff5a3c'; ge.fillRect(x, y, cw - 14, rh - 20); }  // lit
+            if (Math.random() < 0.35) { g.fillStyle = '#9a9a96'; g.fillRect(x + 4, y + rh - 20, 16, 9); }   // AC box
+            if (Math.random() < 0.12) { g.fillStyle = '#b5472f'; g.fillRect(x - 3, y - 4, cw - 8, 3); }     // rust / sign strip
+        }
+    }
+    for (let i = 0; i < 40; i++) { g.fillStyle = 'rgba(30,28,24,0.12)'; g.fillRect(Math.random() * FTW, 0, 2 + Math.random() * 5, FTH); }
+    const t1 = new THREE.CanvasTexture(c), t2 = new THREE.CanvasTexture(e);
+    [t1, t2].forEach(t => { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace; });
+    return { map: t1, emissive: t2 };
+})();
+const towerSide = new THREE.MeshStandardMaterial({ map: facade.map, emissiveMap: facade.emissive, emissive: 0xffffff, emissiveIntensity: 0.5, roughness: 0.95 });
+const towerTop = new THREE.MeshStandardMaterial({ color: 0x6e6c66, roughness: 1 });
+
+// seven height classes, low-rise on the outskirts up to ~100-unit megatowers in the core
+const TOWER_W = 12, TIER_H = [18, 28, 40, 54, 70, 88, 104], TIER_CAP = 260;
+const towerTiers = TIER_H.map(H => {
+    const g = new THREE.BoxGeometry(TOWER_W, H + 3, TOWER_W).translate(0, (H + 3) / 2 - 3, 0);   // base sunk 3 into the ground
+    const p = g.attributes.position, n = g.attributes.normal, uv = g.attributes.uv;
+    for (let i = 0; i < uv.count; i++) {                                                         // tile the facade by real size
+        if (Math.abs(n.getY(i)) > 0.5) continue;
+        uv.setXY(i, (Math.abs(n.getX(i)) > 0.5 ? p.getZ(i) : p.getX(i)) / 18, p.getY(i) / 20);
+    }
+    const mesh = new THREE.InstancedMesh(g, [towerSide, towerSide, towerTop, towerTop, towerSide, towerSide], TIER_CAP);
+    mesh.count = 0;
+    island.add(mesh);
+    return { H, mesh };
+});
+
+// rooftop clutter: water tanks + antennas
+const tankM = new THREE.InstancedMesh(new THREE.CylinderGeometry(1.5, 1.5, 2.6, 10).translate(0, 1.3, 0), new THREE.MeshStandardMaterial({ roughness: 0.8 }), 1200);
+const antM = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.08, 0.12, 9, 5).translate(0, 4.5, 0), new THREE.MeshStandardMaterial({ color: 0x55575a }), 900);
+tankM.count = antM.count = 0;
+const tankCols = [0x7a8590, 0x8a5a44, 0x5d6b73, 0x9aa09a];
+const towerCols = [0xd4d0c6, 0xbfc5bb, 0xcdbfa8, 0xb5b8c0, 0xc9b6ae, 0xa9a69c];
+
+for (const t of towns) {
+    const R = t.rad * 1.4;
+    for (let k = 0; k < 2500; k++) {
+        const rr = Math.sqrt(Math.random()) * R, a = Math.random() * Math.PI * 2;
+        const x = t.x + Math.cos(a) * rr, z = t.z + Math.sin(a) * rr;
+        const h = heightAt(x, z);
+        if (h < 1.2 || h > 16 || slopeAt(x, z) > 0.2) continue;
+        const sx = 0.85 + Math.random() * 0.4, sz = 0.8 + Math.random() * 0.5;
+        const r = 6.5 * Math.max(sx, sz);
+        if (riverDist(x, z) < 11 + r * 0.5) continue;
+        if (placedB.some(b => Math.hypot(b.x - x, b.z - z) < b.r + r - 4)) continue;          // nearly touching = merged mass
+        const ti = Math.max(0, Math.min(6, Math.floor((1 - (rr / R) * (rr / R)) * 7 + (Math.random() - 0.5) * 2.6)));
+        const tier = towerTiers[ti];
+        if (tier.mesh.count >= TIER_CAP) continue;
+        const rot = t.ang + (Math.random() - 0.5) * 0.12, sy = 0.9 + Math.random() * 0.2;
+        placedB.push({ x, z, r, h, top: h + tier.H * sy, rot, sx, sz });
+        bDummy.position.set(x, h, z);
+        bDummy.rotation.set(0, rot, 0);
+        bDummy.scale.set(sx, sy, sz);
+        bDummy.updateMatrix();
+        const i = tier.mesh.count++;
+        tier.mesh.setMatrixAt(i, bDummy.matrix);
+        tier.mesh.setColorAt(i, tc.setHex(pick(towerCols)));
+        // rooftop clutter in the tower's local frame
+        const top = h + tier.H * sy, cr = Math.cos(rot), sr = Math.sin(rot);
+        const put = (mesh, scl, col) => {
+            if (mesh.count >= mesh.instanceMatrix.count) return;
+            const dx = (Math.random() - 0.5) * 8 * sx, dz = (Math.random() - 0.5) * 8 * sz;
+            bDummy.position.set(x + dx * cr + dz * sr, top, z - dx * sr + dz * cr);
+            bDummy.rotation.set(0, Math.random() * Math.PI, 0);
+            bDummy.scale.setScalar(scl);
+            bDummy.updateMatrix();
+            const j = mesh.count++;
+            mesh.setMatrixAt(j, bDummy.matrix);
+            if (col !== undefined) mesh.setColorAt(j, tc.setHex(col));
+        };
+        for (let q = 0, nt = 1 + Math.floor(Math.random() * 3); q < nt; q++) put(tankM, 0.8 + Math.random() * 0.6, pick(tankCols));
+        for (let q = 0, na = Math.floor(Math.random() * 3); q < na; q++) put(antM, 0.7 + Math.random() * 0.9);
+    }
+}
+// ---------- MOUNTAIN DISTRICTS: terraced towers on the slopes ----------
+const HILL_H = [14, 22, 32, 44], HILL_CAP = 450;
+const hillTiers = HILL_H.map(H => {
+    const g = new THREE.BoxGeometry(TOWER_W, H + 12, TOWER_W).translate(0, (H + 12) / 2 - 12, 0);   // deep foundation for slopes
+    const p = g.attributes.position, n = g.attributes.normal, uv = g.attributes.uv;
+    for (let i = 0; i < uv.count; i++) {
+        if (Math.abs(n.getY(i)) > 0.5) continue;
+        uv.setXY(i, (Math.abs(n.getX(i)) > 0.5 ? p.getZ(i) : p.getX(i)) / 18, p.getY(i) / 20);
+    }
+    const mesh = new THREE.InstancedMesh(g, [towerSide, towerSide, towerTop, towerTop, towerSide, towerSide], HILL_CAP);
+    mesh.count = 0;
+    island.add(mesh);
+    return { H, mesh };
+});
+for (const t of hills) {
+    for (let k = 0; k < 2500; k++) {
+        const rr = Math.sqrt(Math.random()) * t.rad, a = Math.random() * Math.PI * 2;
+        const x = t.x + Math.cos(a) * rr, z = t.z + Math.sin(a) * rr;
+        if (coastD(x, z) < 0.15) continue;
+        const sx = 0.85 + Math.random() * 0.4, sz = 0.8 + Math.random() * 0.5, r = 6.5 * Math.max(sx, sz);
+        const h0 = Math.min(heightAt(x, z), heightAt(x + 6, z), heightAt(x - 6, z), heightAt(x, z + 6), heightAt(x, z - 6));
+        if (h0 < 8 || slopeAt(x, z) > 1.0 || riverDist(x, z) < 11 + r * 0.5) continue;
+        if (placedB.some(b => Math.hypot(b.x - x, b.z - z) < b.r + r - 4)) continue;
+        const ti = Math.max(0, Math.min(3, Math.floor((1 - (rr / t.rad) * (rr / t.rad)) * 4 + (Math.random() - 0.5) * 1.6)));
+        const tier = hillTiers[ti];
+        if (tier.mesh.count >= HILL_CAP) continue;
+        const rot = t.ang + (Math.random() - 0.5) * 0.12, sy = 0.9 + Math.random() * 0.2;
+        placedB.push({ x, z, r, h: h0, top: h0 + tier.H * sy, rot, sx, sz });
+        bDummy.position.set(x, h0 - 0.3, z);
+        bDummy.rotation.set(0, rot, 0);
+        bDummy.scale.set(sx, sy, sz);
+        bDummy.updateMatrix();
+        const i = tier.mesh.count++;
+        tier.mesh.setMatrixAt(i, bDummy.matrix);
+        tier.mesh.setColorAt(i, tc.setHex(pick(towerCols)));
+        if (tankM.count < 1200) {                                          // rooftop water tank
+            bDummy.position.set(x + (Math.random() - 0.5) * 5, h0 + tier.H * sy, z + (Math.random() - 0.5) * 5);
+            bDummy.scale.setScalar(0.8 + Math.random() * 0.6);
+            bDummy.updateMatrix();
+            const j = tankM.count++;
+            tankM.setMatrixAt(j, bDummy.matrix); tankM.setColorAt(j, tc.setHex(pick(tankCols)));
+        }
+    }
+}
+[...towerTiers.map(t => t.mesh), ...hillTiers.map(t => t.mesh), tankM, antM].forEach(m => {
+    m.instanceMatrix.needsUpdate = true;
+    if (m.instanceColor) m.instanceColor.needsUpdate = true;
+});
+island.add(tankM, antM);
+console.log('Walled-city towers:', placedB.length);
+
+// ---------- RIVER: water ribbon from the mountains to the sea ----------
+{
+    const pos = [], nor = [], idx = [], hw = 3.6;
+    for (let z = zSrc + 16, i = 0; z <= zMouth + 2; z += 2, i++) {
+        const cx = riverX(z), y = riverSurfaceY(z);
+        pos.push(cx - hw, y, z, cx + hw, y, z); nor.push(0, 1, 0, 0, 1, 0);
+        if (i > 0) { const a = (i - 1) * 2; idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3); }
+    }
+    const rg = new THREE.BufferGeometry();
+    rg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    rg.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+    rg.setIndex(idx);
+    const river = new THREE.Mesh(rg, new THREE.MeshStandardMaterial({
+        color: 0x3a8fa8, transparent: true, opacity: 0.55, roughness: 0.15, metalness: 0.1, side: THREE.DoubleSide, depthWrite: false
+    }));
+    island.add(river);
+}
+
+// ---------- two bridges over the river ----------
+for (const bz of [zMouth - 18, zMouth - 48]) {
+    const dxdz = riverX(bz + 1) - riverX(bz - 1);
+    const deck = new THREE.Mesh(new THREE.BoxGeometry(22, 0.5, 4), new THREE.MeshStandardMaterial({ color: 0x9a9a94, roughness: 1 }));
+    deck.position.set(riverX(bz), riverSurfaceY(bz) + 2.0, bz);
+    deck.rotation.y = Math.atan(dxdz / 2);
+    island.add(deck);
+}
+
+// ---------- RED STREET LIGHTS ----------
+const glowTex = (() => {
+    const c = document.createElement('canvas'); c.width = c.height = 64;
+    const g = c.getContext('2d'), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.25, 'rgba(255,255,255,0.55)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+    return new THREE.CanvasTexture(c);
+})();
+const lamps = [];                                                     // street lamp bases {x, y, z}
+for (let z = zSrc + 22; z < zMouth - 4; z += 14) {                    // along both river banks
+    for (const side of [-1, 1]) { const x = riverX(z) + side * 8.5; lamps.push({ x, y: heightAt(x, z), z }); }
+}
+for (const t of [...towns, ...hills]) {                               // in the alleys between buildings
+    let got = 0;
+    for (let k = 0; k < 700 && got < 22; k++) {
+        const a = Math.random() * Math.PI * 2, rr = Math.sqrt(Math.random()) * t.rad;
+        const x = t.x + Math.cos(a) * rr, z = t.z + Math.sin(a) * rr;
+        const h = heightAt(x, z);
+        if (h < 1.2 || slopeAt(x, z) > 0.35 || riverDist(x, z) < 10) continue;
+        let nearest = 1e9, inside = false;
+        for (const b of placedB) { const d = Math.hypot(b.x - x, b.z - z) - b.r; if (d < 0.5) { inside = true; break; } nearest = Math.min(nearest, d); }
+        if (inside || nearest > 7) continue;
+        lamps.push({ x, y: h, z }); got++;
+    }
+}
+const NL = lamps.length;
+const poleM = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.12, 0.16, 6, 6).translate(0, 3, 0), new THREE.MeshStandardMaterial({ color: 0x3a3a3a, roughness: 0.8 }), Math.max(1, NL));
+const headM = new THREE.InstancedMesh(new THREE.SphereGeometry(0.45, 8, 6).translate(0, 6.2, 0), new THREE.MeshBasicMaterial({ color: 0xff3b2a }), Math.max(1, NL));
+const poolM = new THREE.InstancedMesh(new THREE.CircleGeometry(7.5, 24).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({ map: glowTex, color: 0xff2a1a, transparent: true, opacity: 0.6, blending: THREE.AdditiveBlending, depthWrite: false }), NL + 80);
+let pc = 0;
+lamps.forEach((l, i) => {
+    bDummy.position.set(l.x, l.y - 0.2, l.z); bDummy.rotation.set(0, 0, 0); bDummy.scale.setScalar(1); bDummy.updateMatrix();
+    poleM.setMatrixAt(i, bDummy.matrix); headM.setMatrixAt(i, bDummy.matrix);
+    bDummy.position.y = l.y + 0.3; bDummy.updateMatrix();                // light pool on the ground
+    poolM.setMatrixAt(pc++, bDummy.matrix);
+});
+for (let z = zSrc + 24; z < zMouth - 2 && pc < NL + 80; z += 9) {      // light pools on the river water
+    bDummy.position.set(riverX(z), riverSurfaceY(z) + 0.12, z); bDummy.scale.setScalar(1.1); bDummy.updateMatrix();
+    poolM.setMatrixAt(pc++, bDummy.matrix);
+}
+poolM.count = pc;
+poleM.count = headM.count = NL;
+island.add(poleM, headM, poolM);
+
+// glowing halos: lamp heads + red lamps mounted on the tower facades
+const haloPos = [];
+lamps.forEach(l => haloPos.push(l.x, l.y + 6.3, l.z));
+for (const b of placedB) {
+    const cr = Math.cos(b.rot), sr = Math.sin(b.rot);
+    for (let q = 0; q < 2; q++) {
+        const dx = (Math.random() < 0.5 ? -1 : 1) * (6 * b.sx + 0.8), dz = (Math.random() - 0.5) * 9 * b.sz;
+        haloPos.push(b.x + dx * cr + dz * sr, b.h + 3 + Math.random() * Math.max(2, b.top - b.h - 5), b.z - dx * sr + dz * cr);
+    }
+}
+const haloGeo = new THREE.BufferGeometry();
+haloGeo.setAttribute('position', new THREE.Float32BufferAttribute(haloPos, 3));
+island.add(new THREE.Points(haloGeo, new THREE.PointsMaterial({
+    map: glowTex, color: 0xff3a28, size: 7, sizeAttenuation: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false
+})));
+
+// a few real red lights so the river and town cores are actually lit
+const addRed = (x, y, z, I, dist) => { const L = new THREE.PointLight(0xff3322, I, dist, 2); L.position.set(x, y, z); island.add(L); };
+[zMouth - 25, zMouth - 70, zMouth - 115, zMouth - 160].forEach(z => { if (z > zSrc + 24) addRed(riverX(z), riverSurfaceY(z) + 7, z, 250, 60); });
+towns.slice(0, 4).forEach(t => addRed(t.x, heightAt(t.x, t.z) + 14, t.z, 400, 80));
+console.log('Street lamps:', NL, '| towers:', placedB.length);
+
+// ## 3D OCEAN + FISH ##
+// Paste AFTER the island snippet (it uses `scene`, `camera`, `water`, `sky`, and optionally `island` / `heightAt`).
+// Then add `updateOcean();` once inside animate() (see notes).
+
+// ---------- 1. see-through water surface ----------
+water.material.transparent = true;
+water.material.uniforms.alpha.value = 0.78;
+water.material.uniforms.waterColor.value.set(0x0a4f66);   // lighter teal so the depths read
+
+// Underside of the surface, so looking up from below shows a rippled "ceiling" instead of nothing
+const underside = new THREE.Mesh(
+    new THREE.PlaneGeometry(10000, 10000).rotateX(Math.PI / 2),       // faces downward
+    new THREE.MeshBasicMaterial({ color: 0x2a8fb5, transparent: true, opacity: 0.55, depthWrite: false })
+);
+underside.position.y = -0.03;
+scene.add(underside);
+
+// ---------- 2. seabed ----------
+const SEABED_Y = -40;
+const seabedGeo = new THREE.PlaneGeometry(3000, 3000, 150, 150).rotateX(-Math.PI / 2);
+{
+    const p = seabedGeo.attributes.position;
+    for (let i = 0; i < p.count; i++) {
+        const x = p.getX(i), z = p.getZ(i);
+        p.setY(i, SEABED_Y - 2 + Math.sin(x * 0.05) * Math.cos(z * 0.04) * 1.5 + Math.sin(x * 0.4 + z * 0.3) * 0.15); // dunes + ripples
+    }
+    seabedGeo.computeVertexNormals();
+}
+const seabed = new THREE.Mesh(seabedGeo, new THREE.MeshStandardMaterial({ color: 0xa8976f, roughness: 1 }));
+seabed.receiveShadow = true;
+scene.add(seabed);
+
+// ---------- 3. fog: light haze above water, thick teal below ----------
+const HAZE = new THREE.Color(0xe8b8b0), DEEP = new THREE.Color(0x0b5d7a);
+scene.fog = new THREE.FogExp2(HAZE.getHex(), 0.00035);
+let uwBlend = 0, lastOceanT = performance.now();
+
+// ---------- 4. fish ----------
+const fishGeo = (() => {
+    const body = new THREE.SphereGeometry(1, 12, 8); body.scale(1.1, 0.5, 0.28);
+    const tail = new THREE.ConeGeometry(0.5, 0.9, 3); tail.rotateZ(-Math.PI / 2); tail.scale(1, 1.5, 0.2); tail.translate(-1.35, 0, 0);
+    return mergeGeometries([body, tail]);          // fish points along +X
+})();
+const fishMat = new THREE.MeshStandardMaterial({ roughness: 0.45, metalness: 0.25 });
+const schools = [];
+const fishDummy = new THREE.Object3D(), fishTmp = new THREE.Color();
+const fTarget = new THREE.Vector3(), fDesired = new THREE.Vector3();
+
+// Call this anytime to add a school of fish
+function addFishSchool({ count = 40, center = new THREE.Vector3(0, -12, -60), radius = 12, speed = 5, size = 0.5, color = 0xffa94d, wander = 35 } = {}) {
+    const mesh = new THREE.InstancedMesh(fishGeo, fishMat, count);
+    mesh.frustumCulled = false;
+    const base = new THREE.Color(color), fish = [];
+    for (let i = 0; i < count; i++) {
+        const r = () => (Math.random() - 0.5);
+        fish.push({
+            p: center.clone().add(new THREE.Vector3(r() * radius * 2, r() * radius * 0.5, r() * radius * 2)),
+            v: new THREE.Vector3(r(), 0, r()).normalize().multiplyScalar(speed),
+            off: new THREE.Vector3(r() * radius * 2, r() * radius * 0.4, r() * radius * 2),
+            s: size * (0.8 + Math.random() * 0.4), ph: Math.random() * 10
+        });
+        mesh.setColorAt(i, fishTmp.copy(base).offsetHSL(0, 0, r() * 0.12));
+    }
+    scene.add(mesh);
+    const school = { mesh, fish, speed, wander, home: center.clone(), center: center.clone(), ph: Math.random() * 100 };
+    schools.push(school);
+    return school;
+}
+
+function updateFish(t, dt) {
+    for (const s of schools) {
+        s.center.set(
+            s.home.x + Math.sin(t * 0.07 + s.ph) * s.wander,
+            s.home.y + Math.sin(t * 0.05 + s.ph * 2) * 5,
+            s.home.z + Math.cos(t * 0.06 + s.ph) * s.wander
+        );
+        for (let i = 0; i < s.fish.length; i++) {
+            const f = s.fish[i];
+            fTarget.copy(s.center).add(f.off);
+            fTarget.x += Math.sin(t * 0.8 + f.ph) * 3;
+            fTarget.y += Math.sin(t * 0.6 + f.ph * 1.7) * 1.5;
+            fDesired.subVectors(fTarget, f.p);
+            const dist = fDesired.length();
+            fDesired.normalize().multiplyScalar(s.speed * (0.6 + Math.min(dist / 10, 1) * 0.8));
+            f.v.lerp(fDesired, Math.min(1, dt * 1.5));
+            f.p.addScaledVector(f.v, dt);
+
+            // stay underwater, above the seabed / island slopes
+            let floor = SEABED_Y + 2;
+            if (typeof heightAt === 'function' && typeof island !== 'undefined') {
+                floor = Math.max(floor, heightAt(f.p.x - island.position.x, f.p.z - island.position.z) + 1.5);
+            }
+            if (floor > -2) { f.v.x *= -1; f.v.z *= -1; f.p.addScaledVector(f.v, dt * 2); }   // bounce off the island
+            f.p.y = Math.min(-1.5, Math.max(floor, f.p.y));
+
+            const sp = f.v.length() + 1e-4;
+            fishDummy.position.copy(f.p);
+            fishDummy.rotation.set(0, Math.atan2(-f.v.z, f.v.x), Math.asin(THREE.MathUtils.clamp(f.v.y / sp, -1, 1)), 'YZX');
+            fishDummy.scale.setScalar(f.s);
+            fishDummy.updateMatrix();
+            s.mesh.setMatrixAt(i, fishDummy.matrix);
+        }
+        s.mesh.instanceMatrix.needsUpdate = true;
+    }
+}
+
+// starter schools (spawned near where the camera starts; dive with Shift to find them)
+addFishSchool({ count: 45, center: new THREE.Vector3(0, -8, -30), radius: 10, color: 0xff8a3d, size: 0.4 });
+addFishSchool({ count: 70, center: new THREE.Vector3(35, -16, -75), radius: 14, color: 0xc9d6df, size: 0.5, speed: 6 });
+addFishSchool({ count: 30, center: new THREE.Vector3(-45, -22, -55), radius: 10, color: 0xffd23f, size: 0.45 });
+
+// ---------- river fish (swim up and down the river) ----------
+const RIVER_FISH = 60;
+const riverFishMesh = new THREE.InstancedMesh(fishGeo, fishMat, RIVER_FISH);
+riverFishMesh.frustumCulled = false;
+const riverFish = [];
+for (let i = 0; i < RIVER_FISH; i++) {
+    riverFish.push({
+        z: zSrc + 20 + Math.random() * Math.max(1, zMouth - zSrc - 26),
+        dir: Math.random() < 0.5 ? 1 : -1, speed: 1.5 + Math.random() * 2.5,
+        lat: (Math.random() - 0.5) * 4.4, ph: Math.random() * 10,
+        s: 0.2 + Math.random() * 0.14, depth: 0.4 + Math.random() * 0.5
+    });
+    riverFishMesh.setColorAt(i, fishTmp.setHex([0xc9d6df, 0xff8a3d, 0x9bb07a, 0xe8c36a][i % 4]));
+}
+island.add(riverFishMesh);
+
+function updateRiverFish(t, dt) {
+    for (let i = 0; i < RIVER_FISH; i++) {
+        const f = riverFish[i];
+        f.z += f.dir * f.speed * dt;
+        if (f.z > zMouth - 3) { f.z = zMouth - 3; f.dir = -1; }
+        if (f.z < zSrc + 18) { f.z = zSrc + 18; f.dir = 1; }
+        const wob = Math.sin(t * 0.9 + f.ph) * 0.6;
+        const x = riverX(f.z) + f.lat + wob;
+        const y = riverSurfaceY(f.z) - f.depth;
+        const vx = (riverX(f.z + 0.5) - riverX(f.z - 0.5)) * f.dir + Math.cos(t * 0.9 + f.ph) * 0.15, vz = f.dir;
+        fishDummy.position.set(x, y, f.z);
+        fishDummy.rotation.set(0, Math.atan2(-vz, vx) + Math.sin(t * 7 + f.ph) * 0.12, 0, 'YZX');
+        fishDummy.scale.setScalar(f.s);
+        fishDummy.updateMatrix();
+        riverFishMesh.setMatrixAt(i, fishDummy.matrix);
+    }
+    riverFishMesh.instanceMatrix.needsUpdate = true;
+}
+
+// ---------- 5. per-frame update: call once inside animate() ----------
+function updateOcean() {
+    const now = performance.now();
+    const dt = Math.min((now - lastOceanT) / 1000, 0.05);
+    lastOceanT = now;
+    const t = now / 1000;
+
+    const under = camera.position.y < 0;
+    uwBlend += ((under ? 1 : 0) - uwBlend) * Math.min(1, dt * 8);
+    scene.fog.color.copy(HAZE).lerp(DEEP, uwBlend);
+    scene.fog.density = 0.00035 + (0.028 - 0.00035) * uwBlend;
+    sky.visible = !under;
+    cloudDome.visible = CLOUDS && !under;
+    cloudDome.position.copy(camera.position);
+    cloudMat.uniforms.time.value = t;
+    scene.background = under ? scene.fog.color : null;
+
+    updateFish(t, dt);
+    updateRiverFish(t, dt);
+}
+
+
+        // ## PERFORMANCE OPTIMIZATION ##
+        const clock = new THREE.Clock();
+        let adaptiveQuality = 1.0;
+
+        function updatePerformance() {
+            const currentTime = performance.now();
+            const deltaTime = currentTime - lastTime;
+            const fps = 1000 / deltaTime;
+
+            fpsHistory.push(fps);
+            if (fpsHistory.length > 60) fpsHistory.shift();
+
+            const avgFps = fpsHistory.reduce((a, b) => a + b, 0) / fpsHistory.length;
+
+            if (avgFps < 45 && adaptiveQuality > 0.5) {
+                adaptiveQuality = Math.max(0.5, adaptiveQuality - 0.1);
+                renderer.setPixelRatio(Math.min(window.devicePixelRatio * adaptiveQuality, 1));
+            } else if (avgFps > 55 && adaptiveQuality < 1.0) {
+                adaptiveQuality = Math.min(1.0, adaptiveQuality + 0.05);
+                renderer.setPixelRatio(Math.min(window.devicePixelRatio * adaptiveQuality, 2));
+            }
+
+            lastTime = currentTime;
+
+            if (frameCount % 30 === 0) {
+                document.getElementById('fpsInControls').textContent = Math.round(avgFps);
+            }
+        }
+
+        // Ripple effect
+        function createRipple(position) {
+            if (ripples.length >= maxRipples) ripples.shift();
+            ripples.push({ position: position.clone(), time: water.material.uniforms.time.value });
+            water.material.uniforms.ripplePositions.value = ripples.map(r => r.position);
+            water.material.uniforms.rippleTimes.value = ripples.map(r => r.time);
+            water.material.uniforms.rippleCount.value = ripples.length;
+        }
+
+        // Movement with water interaction
+        function updateMovement(deltaTime) {
+            if (!isFirstPerson) return;
+
+            previousPosition.copy(camera.position);
+
+            const moveVector = new THREE.Vector3();
+            const cameraDirection = new THREE.Vector3();
+
+            camera.getWorldDirection(cameraDirection);
+            const right = new THREE.Vector3().crossVectors(cameraDirection, camera.up).normalize();
+            const forward = cameraDirection.clone();
+            forward.normalize();                       // full 3D: look down + W to dive
+
+            if (keys.forward) moveVector.add(forward);
+            if (keys.backward) moveVector.sub(forward);
+            if (keys.left) moveVector.sub(right);
+            if (keys.right) moveVector.add(right);
+            if (keys.up) moveVector.add(camera.up);
+            if (keys.down) moveVector.sub(camera.up);
+
+            if (moveVector.length() > 0) {
+                moveVector.normalize();
+                moveVector.multiplyScalar(moveSpeed * (keys.sprint ? 2.5 : 1) * deltaTime);
+                camera.position.add(moveVector);
+            }
+
+            velocity.subVectors(camera.position, previousPosition).divideScalar(deltaTime);
+            const speed = velocity.length();
+
+            water.material.uniforms.userPosition.value.copy(camera.position);
+            water.material.uniforms.userVelocity.value = Math.min(speed / 50, 1.0);
+
+            const distanceToWater = Math.abs(camera.position.y - waterLevel);
+            if (speed > 20 && distanceToWater < 10) {
+                if (Math.random() < 0.1) createRipple(camera.position);
+            }
+
+            if ((previousPosition.y > waterLevel && camera.position.y <= waterLevel) ||
+                (previousPosition.y < waterLevel && camera.position.y >= waterLevel)) {
+                createRipple(new THREE.Vector3(camera.position.x, waterLevel, camera.position.z));
+            }
+        }
+
+        // ## ANIMATION LOOP ##
+        function animate() {
+            requestAnimationFrame(animate);
+            frameCount++;
+
+            const currentTime = performance.now();
+            const deltaTime = (currentTime - lastTime) / 1000;
+            const elapsedTime = clock.getElapsedTime();
+
+            water.material.uniforms['time'].value = elapsedTime;
+
+            updateMovement(deltaTime);
+            updateSun();
+            updateLighting();
+
+            updateOcean();          // underwater fog + fish
+            updatePerformance();
+
+            renderer.render(scene, camera);
+        }
+
+        // ## KEYBOARD AND MOUSE CONTROLS ##
+        document.addEventListener('keydown', (event) => {
+            switch (event.code) {
+                case 'ArrowUp': case 'KeyW': keys.forward = true; break;
+                case 'ArrowDown': case 'KeyS': keys.backward = true; break;
+                case 'ArrowLeft': case 'KeyA': keys.left = true; break;
+                case 'ArrowRight': case 'KeyD': keys.right = true; break;
+                case 'Space': keys.up = true; event.preventDefault(); break;
+                case 'ShiftLeft': case 'ShiftRight': keys.sprint = true; break;
+                case 'KeyC': keys.down = true; break;
+            }
+        });
+
+        document.addEventListener('keyup', (event) => {
+            switch (event.code) {
+                case 'ArrowUp': case 'KeyW': keys.forward = false; break;
+                case 'ArrowDown': case 'KeyS': keys.backward = false; break;
+                case 'ArrowLeft': case 'KeyA': keys.left = false; break;
+                case 'ArrowRight': case 'KeyD': keys.right = false; break;
+                case 'Space': keys.up = false; break;
+                case 'ShiftLeft': case 'ShiftRight': keys.sprint = false; break;
+                case 'KeyC': keys.down = false; break;
+            }
+        });
+
+        let isMouseLocked = false;
+        renderer.domElement.addEventListener('click', () => {
+            if (isFirstPerson) renderer.domElement.requestPointerLock();
+        });
+        document.addEventListener('pointerlockchange', () => {
+            isMouseLocked = document.pointerLockElement === renderer.domElement;
+            document.getElementById('startPrompt').style.display = isMouseLocked ? 'none' : 'block';
+        });
+        document.addEventListener('mousemove', (event) => {
+            if (isMouseLocked && isFirstPerson) {
+                yaw -= event.movementX * lookSpeed;
+                pitch -= event.movementY * lookSpeed;
+                pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch));
+                camera.rotation.order = 'YXZ';
+                camera.rotation.y = yaw;
+                camera.rotation.x = pitch;
+            }
+        });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
